@@ -1,0 +1,115 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: cleanup-task
+spec:
+  params:
+    - name: workspace-path
+      description: Path to the workspace
+      default: /workspace
+  steps:
+    - name: cleanup
+      image: alpine:latest
+      script: |
+        #!/bin/sh
+        echo "Starting cleanup process..."
+        cd $(params.workspace-path)
+        
+        # Remove temporary files
+        find . -name "*.tmp" -delete
+        find . -name "*.log" -delete
+        find . -name "__pycache__" -type d -exec rm -rf {} +
+        find . -name "*.pyc" -delete
+        
+        # Clean Docker images
+        docker system prune -f
+        
+        echo "Cleanup completed successfully"
+      securityContext:
+        runAsUser: 0
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: nose-test-task
+spec:
+  params:
+    - name: workspace-path
+      description: Path to the workspace
+      default: /workspace
+    - name: python-version
+      description: Python version to use
+      default: "3.9"
+  steps:
+    - name: setup-python
+      image: python:$(params.python-version)-alpine
+      script: |
+        #!/bin/sh
+        echo "Setting up Python environment..."
+        pip install --upgrade pip
+        pip install nose2 pytest requests flask
+        
+        echo "Python environment ready"
+      
+    - name: run-nose-tests
+      image: python:$(params.python-version)-alpine
+      script: |
+        #!/bin/sh
+        echo "Running nose tests..."
+        cd $(params.workspace-path)
+        
+        # Install project dependencies
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+        
+        # Run nose tests
+        python -m nose2 tests/ -v --with-coverage
+        
+        echo "Nose tests completed"
+      securityContext:
+        runAsUser: 1000
+
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: ci-cd-pipeline
+spec:
+  params:
+    - name: git-url
+      description: Git repository URL
+    - name: git-revision
+      description: Git revision to checkout
+      default: main
+  workspaces:
+    - name: shared-workspace
+  tasks:
+    - name: fetch-repository
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    
+    - name: run-tests
+      taskRef:
+        name: nose-test-task
+      runAfter: ["fetch-repository"]
+      workspaces:
+        - name: workspace-path
+          workspace: shared-workspace
+    
+    - name: cleanup
+      taskRef:
+        name: cleanup-task
+      runAfter: ["run-tests"]
+      workspaces:
+        - name: workspace-path
+          workspace: shared-workspace 
